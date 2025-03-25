@@ -1,0 +1,40 @@
+syntax = "proto3";
+package pb;
+option go_package = "../proto";
+
+service DistributedLock {
+    rpc Init(InitRequest) returns (InitResponse);
+    rpc LockAcquire(LockRequest) returns (Empty);
+    rpc LockRelease(LockRequest) returns (LockResponse);
+    rpc AppendFile(AppendRequest) returns (AppendResponse);
+}
+
+message Empty {}
+
+message InitRequest {
+    string client_name = 1;
+}
+
+message InitResponse {
+    string client_id = 1;
+    int32 success = 2;
+}
+
+message LockRequest {
+    string client_id = 1;
+    string client_ip_port = 2;
+}
+
+message LockResponse {
+    int32 success = 1; // 0 = granted, 1 = queued
+}
+
+message AppendRequest {
+    string client_id = 1;
+    string file_name = 2;
+    bytes data = 3;
+}
+
+message AppendResponse {
+    int32 success = 1;
+}
