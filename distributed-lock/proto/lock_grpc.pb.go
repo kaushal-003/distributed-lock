@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v3.12.4
-// source: lock.proto
+// source: proto/lock.proto
 
 package proto
 
@@ -19,18 +19,18 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	DistributedLock_Init_FullMethodName        = "/pb.DistributedLock/Init"
-	DistributedLock_LockAcquire_FullMethodName = "/pb.DistributedLock/LockAcquire"
-	DistributedLock_LockRelease_FullMethodName = "/pb.DistributedLock/LockRelease"
-	DistributedLock_AppendFile_FullMethodName  = "/pb.DistributedLock/AppendFile"
+	DistributedLock_InitConnection_FullMethodName = "/distributed_lock.DistributedLock/InitConnection"
+	DistributedLock_LockAcquire_FullMethodName    = "/distributed_lock.DistributedLock/LockAcquire"
+	DistributedLock_LockRelease_FullMethodName    = "/distributed_lock.DistributedLock/LockRelease"
+	DistributedLock_AppendFile_FullMethodName     = "/distributed_lock.DistributedLock/AppendFile"
 )
 
 // DistributedLockClient is the client API for DistributedLock service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type DistributedLockClient interface {
-	Init(ctx context.Context, in *InitRequest, opts ...grpc.CallOption) (*InitResponse, error)
-	LockAcquire(ctx context.Context, in *LockRequest, opts ...grpc.CallOption) (*Empty, error)
+	InitConnection(ctx context.Context, in *InitRequest, opts ...grpc.CallOption) (*InitResponse, error)
+	LockAcquire(ctx context.Context, in *LockRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LockResponse], error)
 	LockRelease(ctx context.Context, in *LockRequest, opts ...grpc.CallOption) (*LockResponse, error)
 	AppendFile(ctx context.Context, in *AppendRequest, opts ...grpc.CallOption) (*AppendResponse, error)
 }
@@ -43,25 +43,34 @@ func NewDistributedLockClient(cc grpc.ClientConnInterface) DistributedLockClient
 	return &distributedLockClient{cc}
 }
 
-func (c *distributedLockClient) Init(ctx context.Context, in *InitRequest, opts ...grpc.CallOption) (*InitResponse, error) {
+func (c *distributedLockClient) InitConnection(ctx context.Context, in *InitRequest, opts ...grpc.CallOption) (*InitResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InitResponse)
-	err := c.cc.Invoke(ctx, DistributedLock_Init_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, DistributedLock_InitConnection_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *distributedLockClient) LockAcquire(ctx context.Context, in *LockRequest, opts ...grpc.CallOption) (*Empty, error) {
+func (c *distributedLockClient) LockAcquire(ctx context.Context, in *LockRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LockResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Empty)
-	err := c.cc.Invoke(ctx, DistributedLock_LockAcquire_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &DistributedLock_ServiceDesc.Streams[0], DistributedLock_LockAcquire_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[LockRequest, LockResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DistributedLock_LockAcquireClient = grpc.ServerStreamingClient[LockResponse]
 
 func (c *distributedLockClient) LockRelease(ctx context.Context, in *LockRequest, opts ...grpc.CallOption) (*LockResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -87,8 +96,8 @@ func (c *distributedLockClient) AppendFile(ctx context.Context, in *AppendReques
 // All implementations must embed UnimplementedDistributedLockServer
 // for forward compatibility.
 type DistributedLockServer interface {
-	Init(context.Context, *InitRequest) (*InitResponse, error)
-	LockAcquire(context.Context, *LockRequest) (*Empty, error)
+	InitConnection(context.Context, *InitRequest) (*InitResponse, error)
+	LockAcquire(*LockRequest, grpc.ServerStreamingServer[LockResponse]) error
 	LockRelease(context.Context, *LockRequest) (*LockResponse, error)
 	AppendFile(context.Context, *AppendRequest) (*AppendResponse, error)
 	mustEmbedUnimplementedDistributedLockServer()
@@ -101,11 +110,11 @@ type DistributedLockServer interface {
 // pointer dereference when methods are called.
 type UnimplementedDistributedLockServer struct{}
 
-func (UnimplementedDistributedLockServer) Init(context.Context, *InitRequest) (*InitResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Init not implemented")
+func (UnimplementedDistributedLockServer) InitConnection(context.Context, *InitRequest) (*InitResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InitConnection not implemented")
 }
-func (UnimplementedDistributedLockServer) LockAcquire(context.Context, *LockRequest) (*Empty, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method LockAcquire not implemented")
+func (UnimplementedDistributedLockServer) LockAcquire(*LockRequest, grpc.ServerStreamingServer[LockResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method LockAcquire not implemented")
 }
 func (UnimplementedDistributedLockServer) LockRelease(context.Context, *LockRequest) (*LockResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method LockRelease not implemented")
@@ -134,41 +143,34 @@ func RegisterDistributedLockServer(s grpc.ServiceRegistrar, srv DistributedLockS
 	s.RegisterService(&DistributedLock_ServiceDesc, srv)
 }
 
-func _DistributedLock_Init_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _DistributedLock_InitConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(InitRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DistributedLockServer).Init(ctx, in)
+		return srv.(DistributedLockServer).InitConnection(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: DistributedLock_Init_FullMethodName,
+		FullMethod: DistributedLock_InitConnection_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DistributedLockServer).Init(ctx, req.(*InitRequest))
+		return srv.(DistributedLockServer).InitConnection(ctx, req.(*InitRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _DistributedLock_LockAcquire_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(LockRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _DistributedLock_LockAcquire_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(LockRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(DistributedLockServer).LockAcquire(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DistributedLock_LockAcquire_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DistributedLockServer).LockAcquire(ctx, req.(*LockRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(DistributedLockServer).LockAcquire(m, &grpc.GenericServerStream[LockRequest, LockResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DistributedLock_LockAcquireServer = grpc.ServerStreamingServer[LockResponse]
 
 func _DistributedLock_LockRelease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(LockRequest)
@@ -210,16 +212,12 @@ func _DistributedLock_AppendFile_Handler(srv interface{}, ctx context.Context, d
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var DistributedLock_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "pb.DistributedLock",
+	ServiceName: "distributed_lock.DistributedLock",
 	HandlerType: (*DistributedLockServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "Init",
-			Handler:    _DistributedLock_Init_Handler,
-		},
-		{
-			MethodName: "LockAcquire",
-			Handler:    _DistributedLock_LockAcquire_Handler,
+			MethodName: "InitConnection",
+			Handler:    _DistributedLock_InitConnection_Handler,
 		},
 		{
 			MethodName: "LockRelease",
@@ -230,6 +228,12 @@ var DistributedLock_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _DistributedLock_AppendFile_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
-	Metadata: "lock.proto",
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "LockAcquire",
+			Handler:       _DistributedLock_LockAcquire_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "proto/lock.proto",
 }
