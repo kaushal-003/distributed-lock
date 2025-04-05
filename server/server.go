@@ -15,7 +15,7 @@ import (
 
 type pendingRequest struct {
 	clientID string
-	response chan bool
+	response chan int32
 }
 
 type LockServer struct {
@@ -23,12 +23,12 @@ type LockServer struct {
 	mu            sync.Mutex
 	lockHolder    string
 	pendingQueue  []pendingRequest
+	queueMap      map[string]bool
 	fileMu        sync.Mutex
 	clientCounter int
 }
 
 func NewLockServer() *LockServer {
-
 	for i := 0; i < 100; i++ {
 		filename := fmt.Sprintf("file_%d", i)
 		if _, err := os.Stat(filename); os.IsNotExist(err) {
@@ -37,6 +37,7 @@ func NewLockServer() *LockServer {
 	}
 	return &LockServer{
 		pendingQueue: make([]pendingRequest, 0),
+		queueMap:     make(map[string]bool),
 	}
 }
 
@@ -60,10 +61,16 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 
 	if s.lockHolder == clientID {
 		s.mu.Unlock()
-		return stream.Send(&pb.LockResponse{Success: true})
+		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 200})
 	}
 
-	respChan := make(chan bool, 1)
+	if s.queueMap[clientID] {
+		s.mu.Unlock()
+		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 201})
+	}
+
+	respChan := make(chan int32, 1)
+	s.queueMap[clientID] = true
 
 	s.pendingQueue = append(s.pendingQueue, pendingRequest{
 		clientID: clientID,
@@ -77,8 +84,8 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 
 	s.mu.Unlock()
 
-	success := <-respChan
-	return stream.Send(&pb.LockResponse{Success: success})
+	code := <-respChan
+	return stream.Send(&pb.LockResponse{Success: true, StatusCode: code})
 }
 
 func (s *LockServer) grantLock() {
@@ -91,7 +98,7 @@ func (s *LockServer) grantLock() {
 	s.pendingQueue = s.pendingQueue[1:]
 	log.Printf("Lock granted to %s", next.clientID)
 
-	next.response <- true
+	next.response <- 200
 	close(next.response)
 }
 
@@ -107,6 +114,7 @@ func (s *LockServer) LockRelease(ctx context.Context, req *pb.LockRequest) (*pb.
 
 	log.Printf("Client %s released the lock", clientID)
 	s.lockHolder = ""
+	delete(s.queueMap, clientID)
 
 	if len(s.pendingQueue) > 0 {
 		s.grantLock()

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	pb "distributed-lock/distributed-lock/proto"
 
@@ -22,55 +23,102 @@ type RPCClient struct {
 }
 
 func New(serverAddr, clientName string) (*RPCClient, error) {
-	conn, err := grpc.Dial(serverAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock())
-	if err != nil {
-		return nil, fmt.Errorf("connection failed: %v", err)
-	}
+	for {
+		conn, err := grpc.Dial(serverAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock())
+		if err != nil {
+			fmt.Printf("Failed to connect to server: %v. Retrying in 2 secs...\n", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
 
-	client := pb.NewDistributedLockClient(conn)
-	initResp, err := client.InitConnection(context.Background(), &pb.InitRequest{
-		ClientName: clientName,
-	})
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("init failed: %v", err)
-	}
+		client := pb.NewDistributedLockClient(conn)
+		initResp, err := client.InitConnection(context.Background(), &pb.InitRequest{
+			ClientName: clientName,
+		})
+		if err != nil {
+			conn.Close()
+			fmt.Printf("Init failed: %v. Retrying in 2 secs...\n", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
 
-	return &RPCClient{
-		conn:     conn,
-		client:   client,
-		ClientID: initResp.ClientId,
-		hasLock:  false,
-	}, nil
+		return &RPCClient{
+			conn:     conn,
+			client:   client,
+			ClientID: initResp.ClientId,
+			hasLock:  false,
+		}, nil
+	}
 }
+
+// func (c *RPCClient) LockAcquire() error {
+// 	if c.hasLock {
+// 		return fmt.Errorf("you already hold the lock")
+// 	}
+
+// 	fmt.Printf("Requesting lock (Client ID: %s)...\n", c.ClientID)
+// 	stream, err := c.client.LockAcquire(context.Background(), &pb.LockRequest{
+// 		ClientId: c.ClientID,
+// 	})
+// 	if err != nil {
+// 		return fmt.Errorf("lock request failed: %v", err)
+// 	}
+
+// 	resp, err := stream.Recv()
+// 	if err != nil {
+// 		return fmt.Errorf("failed to receive lock response: %v", err)
+// 	}
+
+// 	if !resp.Success {
+// 		return fmt.Errorf("server denied lock request")
+// 	}
+
+// 	c.hasLock = true
+// 	fmt.Println("Lock acquired successfully!")
+// 	return nil
+// }
 
 func (c *RPCClient) LockAcquire() error {
 	if c.hasLock {
 		return fmt.Errorf("you already hold the lock")
 	}
 
-	fmt.Printf("Requesting lock (Client ID: %s)...\n", c.ClientID)
-	stream, err := c.client.LockAcquire(context.Background(), &pb.LockRequest{
-		ClientId: c.ClientID,
-	})
-	if err != nil {
-		return fmt.Errorf("lock request failed: %v", err)
-	}
+	isInQueue := false
+	var stream pb.DistributedLock_LockAcquireClient
+	var err error
 
-	resp, err := stream.Recv()
-	if err != nil {
-		return fmt.Errorf("failed to receive lock response: %v", err)
-	}
+	for {
+		if !isInQueue {
+			stream, err = c.client.LockAcquire(context.Background(), &pb.LockRequest{
+				ClientId: c.ClientID,
+			})
+			if err != nil {
+				fmt.Printf("Attempt failed to acquire lock, retrying in 2 secs...\n")
+				time.Sleep(2 * time.Second)
+				continue
+			}
+		}
 
-	if !resp.Success {
-		return fmt.Errorf("server denied lock request")
-	}
+		resp, err := stream.Recv()
+		if err != nil {
+			// fmt.Printf("Error receiving stream: %v. Retrying...\n", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
 
-	c.hasLock = true
-	fmt.Println("Lock acquired successfully!")
-	return nil
+		if resp.StatusCode == 200 {
+			c.hasLock = true
+			fmt.Println("Lock acquired successfully!")
+			return nil
+		} else if resp.StatusCode == 201 {
+			isInQueue = true
+			fmt.Println("You're in the queue. Waiting for lock to be granted...")
+		} else {
+			time.Sleep(2 * time.Second)
+		}
+	}
 }
 
 func (c *RPCClient) LockRelease() error {

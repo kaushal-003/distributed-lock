@@ -26,6 +26,7 @@ message LockRequest {
 
 message LockResponse {
   bool success = 1;
+  int32 status_code = 2;
 }
 
 message AppendRequest {
