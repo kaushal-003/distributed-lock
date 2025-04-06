@@ -26,6 +26,7 @@ type LockServer struct {
 	queueMap      map[string]bool
 	fileMu        sync.Mutex
 	clientCounter int
+	counter       int32
 }
 
 func NewLockServer() *LockServer {
@@ -61,12 +62,12 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 
 	if s.lockHolder == clientID {
 		s.mu.Unlock()
-		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 200})
+		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 200, Counter: 0})
 	}
 
 	if s.queueMap[clientID] {
 		s.mu.Unlock()
-		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 201})
+		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 201, Counter: 0})
 	}
 
 	respChan := make(chan int32, 1)
@@ -85,7 +86,7 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 	s.mu.Unlock()
 
 	code := <-respChan
-	return stream.Send(&pb.LockResponse{Success: true, StatusCode: code})
+	return stream.Send(&pb.LockResponse{Success: true, StatusCode: code, Counter: 0})
 }
 
 func (s *LockServer) grantLock() {
@@ -95,7 +96,9 @@ func (s *LockServer) grantLock() {
 
 	next := s.pendingQueue[0]
 	s.lockHolder = next.clientID
-	s.pendingQueue = s.pendingQueue[1:]
+	s.counter = 0
+	//TODO:
+	s.pendingQueue = s.pendingQueue[1:] //may become a bottleneck
 	log.Printf("Lock granted to %s", next.clientID)
 
 	next.response <- 200
@@ -132,22 +135,27 @@ func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb
 	s.mu.Unlock()
 
 	if lockHolder != req.ClientId {
-		return &pb.AppendResponse{Success: false}, nil
+		return &pb.AppendResponse{Success: false, Counter: s.counter}, nil
 	}
 
 	filename := req.Filename
+	count := req.Counter
+
+	if count == s.counter {
+		return &pb.AppendResponse{Success: false, Counter: s.counter}, nil
+	}
 
 	file, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		return &pb.AppendResponse{Success: false}, nil
+		return &pb.AppendResponse{Success: false, Counter: s.counter}, nil
 	}
 	defer file.Close()
 
 	if _, err := file.Write(req.Data); err != nil {
-		return &pb.AppendResponse{Success: false}, nil
+		return &pb.AppendResponse{Success: false, Counter: s.counter}, nil
 	}
-
-	return &pb.AppendResponse{Success: true}, nil
+	s.counter = count
+	return &pb.AppendResponse{Success: true, Counter: s.counter}, nil
 }
 
 func main() {

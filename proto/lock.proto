@@ -27,14 +27,17 @@ message LockRequest {
 message LockResponse {
   bool success = 1;
   int32 status_code = 2;
+  int32 counter = 3;
 }
 
 message AppendRequest {
   string client_id = 1;
   string filename = 2;
   bytes data = 3;
+  int32 counter = 4;
 }
 
 message AppendResponse {
   bool success = 1;
+  int32 counter = 2;
 }

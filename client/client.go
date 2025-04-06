@@ -20,6 +20,7 @@ type RPCClient struct {
 	client   pb.DistributedLockClient
 	ClientID string
 	hasLock  bool
+	count    int
 }
 
 func New(serverAddr, clientName string) (*RPCClient, error) {
@@ -110,6 +111,7 @@ func (c *RPCClient) LockAcquire() error {
 
 		if resp.StatusCode == 200 {
 			c.hasLock = true
+			c.count = int(resp.Counter)
 			fmt.Println("Lock acquired successfully!")
 			return nil
 		} else if resp.StatusCode == 201 {
@@ -149,20 +151,27 @@ func (c *RPCClient) AppendFile(fileName, data string) error {
 	}
 
 	fmt.Printf("Writing to %s: %s\n", fileName, data)
-	resp, err := c.client.AppendFile(context.Background(), &pb.AppendRequest{
-		ClientId: c.ClientID,
-		Filename: fileName,
-		Data:     []byte(data),
-	})
-	if err != nil {
-		return fmt.Errorf("write failed: %v", err)
-	}
+	for {
+		resp, err := c.client.AppendFile(context.Background(), &pb.AppendRequest{
+			ClientId: c.ClientID,
+			Filename: fileName,
+			Data:     []byte(data),
+			Counter:  int32(c.count + 1),
+		})
+		if err != nil {
+			time.Sleep(2 * time.Second)
+		}
 
-	if !resp.Success {
-		return fmt.Errorf("server failed to write data")
-	}
+		if !resp.Success {
+			time.Sleep(2 * time.Second)
+		}
 
-	fmt.Println("Data written successfully!")
+		if resp.Success {
+			break
+		}
+		fmt.Println("Data written successfully!")
+	}
+	c.count++
 	return nil
 }
 
