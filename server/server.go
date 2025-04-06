@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"net"
@@ -19,6 +20,13 @@ type pendingRequest struct {
 	response chan int32
 }
 
+type PersistentState struct {
+	LockHolder   string
+	PendingQueue []string
+	QueueMap     map[string]bool
+	Counter      int32
+}
+
 type LockServer struct {
 	pb.UnimplementedDistributedLockServer
 	mu               sync.Mutex
@@ -33,6 +41,65 @@ type LockServer struct {
 	lastLockActivity time.Time
 }
 
+func (s *LockServer) saveState() {
+	state := PersistentState{
+		LockHolder:   s.lockHolder,
+		PendingQueue: make([]string, len(s.pendingQueue)),
+		QueueMap:     s.queueMap,
+		Counter:      s.counter,
+	}
+
+	for i, req := range s.pendingQueue {
+		state.PendingQueue[i] = req.clientID
+	}
+
+	// Open or create the file, truncate it to overwrite
+	file, err := os.OpenFile("lockserver_state.gob", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		log.Printf("Error opening/creating state file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	encoder := gob.NewEncoder(file)
+	if err := encoder.Encode(state); err != nil {
+		log.Printf("Failed to encode state: %v", err)
+		return
+	}
+
+	log.Println("Server state successfully saved.")
+}
+
+func (s *LockServer) loadState() {
+	file, err := os.Open("lockserver_state.gob")
+	if err != nil {
+		log.Println("No previous state found, starting fresh.")
+		return
+	}
+	defer file.Close()
+
+	var state PersistentState
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&state); err != nil {
+		log.Printf("Failed to decode state: %v", err)
+		return
+	}
+
+	s.lockHolder = state.LockHolder
+	s.queueMap = state.QueueMap
+	s.counter = state.Counter
+
+	s.pendingQueue = make([]pendingRequest, len(state.PendingQueue))
+	for i, clientID := range state.PendingQueue {
+		s.pendingQueue[i] = pendingRequest{
+			clientID: clientID,
+			response: make(chan int32, 1),
+		}
+	}
+
+	log.Println("Recovery completed")
+}
+
 func NewLockServer() *LockServer {
 	for i := 0; i < 100; i++ {
 		filename := fmt.Sprintf("file_%d", i)
@@ -40,12 +107,18 @@ func NewLockServer() *LockServer {
 			os.WriteFile(filename, []byte{}, 0644)
 		}
 	}
-	return &LockServer{
+	s := &LockServer{
 		pendingQueue:     make([]pendingRequest, 0),
 		queueMap:         make(map[string]bool),
 		lockTimeout:      20 * time.Second,
 		lastLockActivity: time.Now(),
 	}
+
+	s.loadState()
+	if s.lockHolder != "" {
+		s.lockTimer = time.AfterFunc(s.lockTimeout, s.timeoutLock)
+	}
+	return s
 }
 
 func (s *LockServer) InitConnection(ctx context.Context, req *pb.InitRequest) (*pb.InitResponse, error) {
@@ -66,7 +139,7 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 	s.mu.Lock()
 	clientID := req.ClientId
 
-	log.Println("Size of pendingQueue:", len(s.pendingQueue))
+	//log.Println("Size of pendingQueue:", len(s.pendingQueue))
 
 	if s.lockHolder == clientID {
 		s.mu.Unlock()
@@ -94,6 +167,7 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 	s.mu.Unlock()
 
 	code := <-respChan
+	s.saveState()
 	return stream.Send(&pb.LockResponse{Success: true, StatusCode: code, Counter: 0})
 }
 
@@ -168,7 +242,7 @@ func (s *LockServer) LockRelease(ctx context.Context, req *pb.LockRequest) (*pb.
 	if len(s.pendingQueue) > 0 {
 		s.grantLock()
 	}
-
+	s.saveState()
 	return &pb.LockResponse{Success: true}, nil
 }
 
@@ -201,6 +275,7 @@ func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb
 		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
 	}
 	s.counter = count
+	s.saveState()
 	return &pb.AppendResponse{Success: true, Counter: s.counter, StatusCode: 200}, nil
 }
 

@@ -103,9 +103,9 @@ func New(serverAddr, clientName string) (*RPCClient, error) {
 // }
 
 func (c *RPCClient) LockAcquire() error {
-	if c.hasLock {
-		return fmt.Errorf("you already hold the lock")
-	}
+	// if c.hasLock {
+	// 	return fmt.Errorf("you already hold the lock")
+	// }
 
 	var stream pb.DistributedLock_LockAcquireClient
 	var err error
@@ -148,9 +148,9 @@ func (c *RPCClient) LockAcquire() error {
 }
 
 func (c *RPCClient) LockRelease() error {
-	if !c.hasLock {
-		return fmt.Errorf("you don't hold the lock")
-	}
+	// if !c.hasLock {
+	// 	return fmt.Errorf("you don't hold the lock")
+	// }
 
 	fmt.Println("Releasing lock...")
 	resp, err := c.client.LockRelease(context.Background(), &pb.LockRequest{
@@ -175,9 +175,9 @@ func (c *RPCClient) LockRelease() error {
 }
 
 func (c *RPCClient) AppendFile(fileName, data string) error {
-	if !c.hasLock {
-		return fmt.Errorf("you must acquire the lock first")
-	}
+	// if !c.hasLock {
+	// 	return fmt.Errorf("you must acquire the lock first")
+	// }
 
 	fmt.Printf("Writing to %s: %s\n", fileName, data)
 	for {
@@ -228,8 +228,7 @@ Available commands:
 1. acquire   - Request the lock (blocks until acquired)
 2. write     <file> <data> - Write data to file
 3. release   - Release the lock
-4. status    - Show current lock status
-5. exit      - Close connection and exit`)
+4. exit      - Close connection and exit`)
 }
 
 func main() {
