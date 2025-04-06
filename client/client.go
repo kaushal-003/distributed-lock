@@ -35,7 +35,9 @@ func New(serverAddr, clientName string) (*RPCClient, error) {
 		}
 
 		client := pb.NewDistributedLockClient(conn)
-		initResp, err := client.InitConnection(context.Background(), &pb.InitRequest{
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		initResp, err := client.InitConnection(ctx, &pb.InitRequest{
 			ClientName: clientName,
 		})
 		if err != nil {
@@ -59,26 +61,45 @@ func New(serverAddr, clientName string) (*RPCClient, error) {
 // 		return fmt.Errorf("you already hold the lock")
 // 	}
 
-// 	fmt.Printf("Requesting lock (Client ID: %s)...\n", c.ClientID)
-// 	stream, err := c.client.LockAcquire(context.Background(), &pb.LockRequest{
-// 		ClientId: c.ClientID,
-// 	})
-// 	if err != nil {
-// 		return fmt.Errorf("lock request failed: %v", err)
-// 	}
+// 	isInQueue := false
+// 	var stream pb.DistributedLock_LockAcquireClient
+// 	var err error
 
-// 	resp, err := stream.Recv()
-// 	if err != nil {
-// 		return fmt.Errorf("failed to receive lock response: %v", err)
-// 	}
+// 	for {
+// 		if !isInQueue {
+// 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+// 			defer cancel()
+// 			stream, err = c.client.LockAcquire(ctx, &pb.LockRequest{
+// 				ClientId: c.ClientID,
+// 			})
+// 			if err != nil {
+// 				fmt.Printf("Attempt failed to acquire lock, retrying in 2 secs...\n")
+// 				time.Sleep(2 * time.Second)
+// 				continue
+// 			}
+// 		}
 
-// 	if !resp.Success {
-// 		return fmt.Errorf("server denied lock request")
-// 	}
+// 		resp, err := stream.Recv()
+// 		fmt.Println(resp.StatusCode)
+// 		if err != nil {
+// 			// fmt.Printf("Error receiving stream: %v. Retrying...\n", err)
+// 			time.Sleep(2 * time.Second)
+// 			continue
+// 		}
 
-// 	c.hasLock = true
-// 	fmt.Println("Lock acquired successfully!")
-// 	return nil
+// 		if resp.StatusCode == 200 {
+// 			c.hasLock = true
+// 			c.count = int(resp.Counter)
+// 			fmt.Println("Lock acquired successfully!")
+// 			return nil
+// 		} else if resp.StatusCode == 201 {
+// 			isInQueue = true
+// 			fmt.Println("You're in the queue. Waiting for lock to be granted...")
+// 		} else {
+// 			time.Sleep(2 * time.Second)
+// 		}
+// 		time.Sleep(2 * time.Second)
+// 	}
 // }
 
 func (c *RPCClient) LockAcquire() error {
@@ -86,9 +107,9 @@ func (c *RPCClient) LockAcquire() error {
 		return fmt.Errorf("you already hold the lock")
 	}
 
-	isInQueue := false
 	var stream pb.DistributedLock_LockAcquireClient
 	var err error
+	isInQueue := false
 
 	for {
 		if !isInQueue {
@@ -96,7 +117,7 @@ func (c *RPCClient) LockAcquire() error {
 				ClientId: c.ClientID,
 			})
 			if err != nil {
-				fmt.Printf("Attempt failed to acquire lock, retrying in 2 secs...\n")
+				fmt.Printf("Attempt failed to acquire lock: %v. Retrying in 2 secs...\n", err)
 				time.Sleep(2 * time.Second)
 				continue
 			}
@@ -104,11 +125,13 @@ func (c *RPCClient) LockAcquire() error {
 
 		resp, err := stream.Recv()
 		if err != nil {
-			// fmt.Printf("Error receiving stream: %v. Retrying...\n", err)
+			fmt.Printf("Error receiving from stream: %v. Retrying...\n", err)
 			time.Sleep(2 * time.Second)
+			isInQueue = false
 			continue
 		}
 
+		fmt.Println(resp.StatusCode)
 		if resp.StatusCode == 200 {
 			c.hasLock = true
 			c.count = int(resp.Counter)
@@ -121,6 +144,7 @@ func (c *RPCClient) LockAcquire() error {
 			time.Sleep(2 * time.Second)
 		}
 	}
+
 }
 
 func (c *RPCClient) LockRelease() error {
@@ -134,6 +158,11 @@ func (c *RPCClient) LockRelease() error {
 	})
 	if err != nil {
 		return fmt.Errorf("release failed: %v", err)
+	}
+
+	if resp.StatusCode == 203 {
+		c.hasLock = false
+		return fmt.Errorf("you don't hold the lock")
 	}
 
 	if !resp.Success {
@@ -152,12 +181,19 @@ func (c *RPCClient) AppendFile(fileName, data string) error {
 
 	fmt.Printf("Writing to %s: %s\n", fileName, data)
 	for {
-		resp, err := c.client.AppendFile(context.Background(), &pb.AppendRequest{
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		resp, err := c.client.AppendFile(ctx, &pb.AppendRequest{
 			ClientId: c.ClientID,
 			Filename: fileName,
 			Data:     []byte(data),
 			Counter:  int32(c.count + 1),
 		})
+		if resp.StatusCode == 203 {
+			c.hasLock = false
+			return fmt.Errorf("you don't hold the lock")
+		}
+
 		if err != nil {
 			time.Sleep(2 * time.Second)
 		}
@@ -167,9 +203,10 @@ func (c *RPCClient) AppendFile(fileName, data string) error {
 		}
 
 		if resp.Success {
+			fmt.Println("Data written successfully!")
 			break
 		}
-		fmt.Println("Data written successfully!")
+
 	}
 	c.count++
 	return nil

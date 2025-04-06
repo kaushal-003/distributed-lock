@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	pb "distributed-lock/distributed-lock/proto"
 
@@ -20,13 +21,16 @@ type pendingRequest struct {
 
 type LockServer struct {
 	pb.UnimplementedDistributedLockServer
-	mu            sync.Mutex
-	lockHolder    string
-	pendingQueue  []pendingRequest
-	queueMap      map[string]bool
-	fileMu        sync.Mutex
-	clientCounter int
-	counter       int32
+	mu               sync.Mutex
+	lockHolder       string
+	pendingQueue     []pendingRequest
+	queueMap         map[string]bool
+	fileMu           sync.Mutex
+	clientCounter    int
+	counter          int32
+	lockTimeout      time.Duration
+	lockTimer        *time.Timer
+	lastLockActivity time.Time
 }
 
 func NewLockServer() *LockServer {
@@ -37,8 +41,10 @@ func NewLockServer() *LockServer {
 		}
 	}
 	return &LockServer{
-		pendingQueue: make([]pendingRequest, 0),
-		queueMap:     make(map[string]bool),
+		pendingQueue:     make([]pendingRequest, 0),
+		queueMap:         make(map[string]bool),
+		lockTimeout:      20 * time.Second,
+		lastLockActivity: time.Now(),
 	}
 }
 
@@ -59,6 +65,8 @@ func (s *LockServer) InitConnection(ctx context.Context, req *pb.InitRequest) (*
 func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_LockAcquireServer) error {
 	s.mu.Lock()
 	clientID := req.ClientId
+
+	log.Println("Size of pendingQueue:", len(s.pendingQueue))
 
 	if s.lockHolder == clientID {
 		s.mu.Unlock()
@@ -96,13 +104,46 @@ func (s *LockServer) grantLock() {
 
 	next := s.pendingQueue[0]
 	s.lockHolder = next.clientID
+
 	s.counter = 0
 	//TODO:
 	s.pendingQueue = s.pendingQueue[1:] //may become a bottleneck
 	log.Printf("Lock granted to %s", next.clientID)
 
+	s.lastLockActivity = time.Now()
+	if s.lockTimer != nil {
+		s.lockTimer.Stop()
+	}
+	s.lockTimer = time.AfterFunc(s.lockTimeout, s.timeoutLock)
+
 	next.response <- 200
 	close(next.response)
+}
+
+func (s *LockServer) timeoutLock() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.lockHolder == "" {
+		return
+	}
+
+	if time.Since(s.lastLockActivity) < s.lockTimeout {
+		s.lockTimer.Reset(s.lockTimeout)
+		return
+	}
+
+	// resp, _:=s.Timeout(context.Background(), &pb.Empty{})
+	// if resp.Success{
+	// 	log.Printf("Lock timeout for client %s", s.lockHolder)
+	// }
+	log.Printf("Lock timeout for client %s", s.lockHolder)
+	delete(s.queueMap, s.lockHolder)
+	s.lockHolder = ""
+
+	if len(s.pendingQueue) > 0 {
+		s.grantLock()
+	}
 }
 
 func (s *LockServer) LockRelease(ctx context.Context, req *pb.LockRequest) (*pb.LockResponse, error) {
@@ -112,12 +153,17 @@ func (s *LockServer) LockRelease(ctx context.Context, req *pb.LockRequest) (*pb.
 	clientID := req.ClientId
 
 	if s.lockHolder != clientID {
-		return &pb.LockResponse{Success: false}, nil
+		return &pb.LockResponse{Success: false, StatusCode: 203}, nil
 	}
 
 	log.Printf("Client %s released the lock", clientID)
 	s.lockHolder = ""
 	delete(s.queueMap, clientID)
+
+	if s.lockTimer != nil {
+		s.lockTimer.Stop()
+		s.lockTimer = nil
+	}
 
 	if len(s.pendingQueue) > 0 {
 		s.grantLock()
@@ -135,27 +181,27 @@ func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb
 	s.mu.Unlock()
 
 	if lockHolder != req.ClientId {
-		return &pb.AppendResponse{Success: false, Counter: s.counter}, nil
+		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 203}, nil
 	}
 
 	filename := req.Filename
 	count := req.Counter
 
 	if count == s.counter {
-		return &pb.AppendResponse{Success: false, Counter: s.counter}, nil
+		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
 	}
 
 	file, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		return &pb.AppendResponse{Success: false, Counter: s.counter}, nil
+		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
 	}
 	defer file.Close()
 
 	if _, err := file.Write(req.Data); err != nil {
-		return &pb.AppendResponse{Success: false, Counter: s.counter}, nil
+		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
 	}
 	s.counter = count
-	return &pb.AppendResponse{Success: true, Counter: s.counter}, nil
+	return &pb.AppendResponse{Success: true, Counter: s.counter, StatusCode: 200}, nil
 }
 
 func main() {

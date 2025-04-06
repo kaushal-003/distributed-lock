@@ -40,4 +40,5 @@ message AppendRequest {
 message AppendResponse {
   bool success = 1;
   int32 counter = 2;
+  int32 status_code = 3;
 }
