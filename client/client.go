@@ -56,56 +56,7 @@ func New(serverAddr, clientName string) (*RPCClient, error) {
 	}
 }
 
-// func (c *RPCClient) LockAcquire() error {
-// 	if c.hasLock {
-// 		return fmt.Errorf("you already hold the lock")
-// 	}
-
-// 	isInQueue := false
-// 	var stream pb.DistributedLock_LockAcquireClient
-// 	var err error
-
-// 	for {
-// 		if !isInQueue {
-// 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-// 			defer cancel()
-// 			stream, err = c.client.LockAcquire(ctx, &pb.LockRequest{
-// 				ClientId: c.ClientID,
-// 			})
-// 			if err != nil {
-// 				fmt.Printf("Attempt failed to acquire lock, retrying in 2 secs...\n")
-// 				time.Sleep(2 * time.Second)
-// 				continue
-// 			}
-// 		}
-
-// 		resp, err := stream.Recv()
-// 		fmt.Println(resp.StatusCode)
-// 		if err != nil {
-// 			// fmt.Printf("Error receiving stream: %v. Retrying...\n", err)
-// 			time.Sleep(2 * time.Second)
-// 			continue
-// 		}
-
-// 		if resp.StatusCode == 200 {
-// 			c.hasLock = true
-// 			c.count = int(resp.Counter)
-// 			fmt.Println("Lock acquired successfully!")
-// 			return nil
-// 		} else if resp.StatusCode == 201 {
-// 			isInQueue = true
-// 			fmt.Println("You're in the queue. Waiting for lock to be granted...")
-// 		} else {
-// 			time.Sleep(2 * time.Second)
-// 		}
-// 		time.Sleep(2 * time.Second)
-// 	}
-// }
-
 func (c *RPCClient) LockAcquire() error {
-	// if c.hasLock {
-	// 	return fmt.Errorf("you already hold the lock")
-	// }
 
 	var stream pb.DistributedLock_LockAcquireClient
 	var err error
@@ -148,10 +99,6 @@ func (c *RPCClient) LockAcquire() error {
 }
 
 func (c *RPCClient) LockRelease() error {
-	// if !c.hasLock {
-	// 	return fmt.Errorf("you don't hold the lock")
-	// }
-
 	fmt.Println("Releasing lock...")
 	resp, err := c.client.LockRelease(context.Background(), &pb.LockRequest{
 		ClientId: c.ClientID,
@@ -175,9 +122,6 @@ func (c *RPCClient) LockRelease() error {
 }
 
 func (c *RPCClient) AppendFile(fileName, data string) error {
-	// if !c.hasLock {
-	// 	return fmt.Errorf("you must acquire the lock first")
-	// }
 
 	fmt.Printf("Writing to %s: %s\n", fileName, data)
 	for {

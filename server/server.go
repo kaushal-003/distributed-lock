@@ -15,11 +15,13 @@ import (
 	"google.golang.org/grpc"
 )
 
+// request queue
 type pendingRequest struct {
 	clientID string
 	response chan int32
 }
 
+// data type to store server state in persistent storage
 type PersistentState struct {
 	LockHolder   string
 	PendingQueue []string
@@ -27,6 +29,7 @@ type PersistentState struct {
 	Counter      int32
 }
 
+// server metadata
 type LockServer struct {
 	pb.UnimplementedDistributedLockServer
 	mu               sync.Mutex
@@ -42,6 +45,10 @@ type LockServer struct {
 }
 
 func (s *LockServer) saveState() {
+	/*
+		saveState serializes the current state of the LockServer and writes it to a
+		file named "lockserver_state.gob".
+	*/
 	state := PersistentState{
 		LockHolder:   s.lockHolder,
 		PendingQueue: make([]string, len(s.pendingQueue)),
@@ -71,6 +78,11 @@ func (s *LockServer) saveState() {
 }
 
 func (s *LockServer) loadState() {
+	/*
+		loadState attempts to restore the LockServer's state from a file named
+		"lockserver_state.gob". If the file is not found, the server starts with
+		a fresh state.
+	*/
 	file, err := os.Open("lockserver_state.gob")
 	if err != nil {
 		log.Println("No previous state found, starting fresh.")
@@ -101,19 +113,29 @@ func (s *LockServer) loadState() {
 }
 
 func NewLockServer() *LockServer {
+	/*
+		NewLockServer initializes and returns a new instance of LockServer.
+		It performs the following tasks:
+	*/
+	//Prepares 100 empty files named "file_0" to "file_99" if they do not exist.
 	for i := 0; i < 100; i++ {
 		filename := fmt.Sprintf("file_%d", i)
 		if _, err := os.Stat(filename); os.IsNotExist(err) {
 			os.WriteFile(filename, []byte{}, 0644)
 		}
 	}
+
+	/*
+		Initializes internal data structures including the pending queue,
+		queue map, lock timeout, and last lock activity timestamp.
+	*/
 	s := &LockServer{
 		pendingQueue:     make([]pendingRequest, 0),
 		queueMap:         make(map[string]bool),
 		lockTimeout:      20 * time.Second,
 		lastLockActivity: time.Now(),
 	}
-
+	//loads prev state if any
 	s.loadState()
 	if s.lockHolder != "" {
 		s.lockTimer = time.AfterFunc(s.lockTimeout, s.timeoutLock)
@@ -122,6 +144,11 @@ func NewLockServer() *LockServer {
 }
 
 func (s *LockServer) InitConnection(ctx context.Context, req *pb.InitRequest) (*pb.InitResponse, error) {
+	/*
+		InitConnection handles the initialization of a new client connection.
+		It assigns a unique client ID based on the provided client name or,
+		if empty, generates one using an internal counter.
+	*/
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -136,10 +163,15 @@ func (s *LockServer) InitConnection(ctx context.Context, req *pb.InitRequest) (*
 }
 
 func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_LockAcquireServer) error {
+	/*
+		LockAcquire handles a client's request to acquire the distributed lock.
+		If the client already holds the lock, it immediately responds with success.
+		If the client is already in the queue, it acknowledges their position.
+		Otherwise, the client is added to the pending queue and must wait for
+		its turn to acquire the lock.
+	*/
 	s.mu.Lock()
 	clientID := req.ClientId
-
-	//log.Println("Size of pendingQueue:", len(s.pendingQueue))
 
 	if s.lockHolder == clientID {
 		s.mu.Unlock()
@@ -172,6 +204,10 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 }
 
 func (s *LockServer) grantLock() {
+	/*
+		grantLock assigns the lock to the next client in the pending queue.
+		If the queue is empty, the method returns immediately.
+	*/
 	if len(s.pendingQueue) == 0 {
 		return
 	}
@@ -180,8 +216,7 @@ func (s *LockServer) grantLock() {
 	s.lockHolder = next.clientID
 
 	s.counter = 0
-	//TODO:
-	s.pendingQueue = s.pendingQueue[1:] //may become a bottleneck
+	s.pendingQueue = s.pendingQueue[1:]
 	log.Printf("Lock granted to %s", next.clientID)
 
 	s.lastLockActivity = time.Now()
@@ -195,6 +230,10 @@ func (s *LockServer) grantLock() {
 }
 
 func (s *LockServer) timeoutLock() {
+	/*
+		timeoutLock removes access of the lock from current lockHolder
+		after timeout.
+	*/
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -207,10 +246,6 @@ func (s *LockServer) timeoutLock() {
 		return
 	}
 
-	// resp, _:=s.Timeout(context.Background(), &pb.Empty{})
-	// if resp.Success{
-	// 	log.Printf("Lock timeout for client %s", s.lockHolder)
-	// }
 	log.Printf("Lock timeout for client %s", s.lockHolder)
 	delete(s.queueMap, s.lockHolder)
 	s.lockHolder = ""
@@ -221,6 +256,12 @@ func (s *LockServer) timeoutLock() {
 }
 
 func (s *LockServer) LockRelease(ctx context.Context, req *pb.LockRequest) (*pb.LockResponse, error) {
+
+	/*
+		LockRelease handles a client's request to release the currently held lock.
+		If the requesting client is not the current lock holder, the request is
+		rejected with an appropriate status code(203).
+	*/
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -247,6 +288,12 @@ func (s *LockServer) LockRelease(ctx context.Context, req *pb.LockRequest) (*pb.
 }
 
 func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb.AppendResponse, error) {
+
+	/*
+		AppendFile allows the current lock holder to append data to a specified file.
+		The operation is permitted only if the requesting client currently holds
+		the lock. It also ensures idempotency using a counter to avoid duplicate writes
+	*/
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
 
