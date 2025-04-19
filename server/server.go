@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -29,19 +30,176 @@ type PersistentState struct {
 	Counter      int32
 }
 
+type Mixed struct {
+	StrVal string
+	IntVal int
+}
+
 // server metadata
 type LockServer struct {
 	pb.UnimplementedDistributedLockServer
-	mu               sync.Mutex
-	lockHolder       string
-	pendingQueue     []pendingRequest
-	queueMap         map[string]bool
-	fileMu           sync.Mutex
-	clientCounter    int
-	counter          int32
-	lockTimeout      time.Duration
-	lockTimer        *time.Timer
-	lastLockActivity time.Time
+	mu                sync.Mutex
+	lockHolder        string
+	pendingQueue      []pendingRequest
+	queueMap          map[string]bool
+	fileMu            sync.Mutex
+	clientCounter     int
+	counter           int32
+	lockTimeout       time.Duration
+	lockTimer         *time.Timer
+	lastLockActivity  time.Time
+	queueindex        int32
+	selfIp            string
+	peers             []string
+	lastHeartbeatTime time.Time
+	leaderIp          string
+}
+
+func (s *LockServer) GetQueueIndex(ctx context.Context, req *pb.Empty) (*pb.GetQueueIndexResponse, error) {
+	return &pb.GetQueueIndexResponse{Index: s.queueindex}, nil
+}
+
+func isReachable(addr string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithInsecure(), grpc.WithBlock())
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+func (s *LockServer) Heartbeat(ctx context.Context, req *pb.Empty) (*pb.Empty, error) {
+	s.mu.Lock()
+	s.lastHeartbeatTime = time.Now()
+	s.mu.Unlock()
+	return &pb.Empty{}, nil
+}
+
+func (s *LockServer) SendandReceiveHeartbeat() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.mu.Lock()
+		currentLeader := s.leaderIp
+		selfIp := s.selfIp
+		lastHB := s.lastHeartbeatTime
+		s.mu.Unlock()
+
+		if selfIp == currentLeader {
+			for _, peer := range s.peers {
+				if peer == selfIp {
+					continue
+				}
+				if !isReachable(peer) {
+					continue
+				}
+				conn, err := grpc.Dial(peer, grpc.WithInsecure())
+				if err != nil {
+					log.Printf("Warning: cannot connect to %s for heartbeat: %v", peer, err)
+					continue
+				}
+				client := pb.NewDistributedLockClient(conn)
+				_, err = client.Heartbeat(context.Background(), &pb.Empty{})
+				if err != nil {
+					log.Printf("Warning: heartbeat failed to %s: %v", peer, err)
+				}
+				conn.Close()
+			}
+		} else {
+
+			elapsed := time.Since(lastHB)
+			log.Printf("Time elapsed since last heartbeat from leader (%s): %v", currentLeader, elapsed)
+
+			if elapsed > 8*time.Second {
+				newLeader := s.electLeader()
+				s.mu.Lock()
+				s.leaderIp = newLeader
+				s.lastHeartbeatTime = time.Now()
+				s.mu.Unlock()
+				log.Printf("Leader elected: %s", newLeader)
+
+				if newLeader == selfIp {
+					s.notifyPeers(newLeader)
+				}
+			}
+		}
+	}
+}
+
+func (s *LockServer) electLeader() string {
+	available := []Mixed{}
+
+	if isReachable(s.selfIp) {
+		available = append(available, Mixed{StrVal: s.selfIp, IntVal: int(s.queueindex)})
+	}
+
+	for _, peer := range s.peers {
+		if isReachable(peer) {
+			conn, err := grpc.Dial(peer, grpc.WithInsecure())
+			if err != nil {
+				log.Printf("Warning: cannot connect to %s to get last committed index: %v", peer, err)
+				continue
+			}
+			client := pb.NewDistributedLockClient(conn)
+			resp, err := client.GetQueueIndex(context.Background(), &pb.Empty{})
+			if err != nil {
+				log.Printf("Warning: cannot get last committed index from %s: %v", peer, err)
+				conn.Close()
+				continue
+			}
+			Ind := resp.Index
+			log.Printf("Last committed index from %s: %d", peer, Ind)
+			Ip := peer
+			conn.Close()
+			available = append(available, Mixed{StrVal: Ip, IntVal: int(Ind)})
+		}
+	}
+	if len(available) == 0 {
+		log.Fatal("No available servers for leader election!")
+	}
+
+	sort.Slice(available, func(i, j int) bool {
+		if available[i].IntVal == available[j].IntVal {
+			return available[i].StrVal < available[j].StrVal
+		}
+		return available[i].IntVal < available[j].IntVal
+	})
+	newLeader := available[len(available)-1].StrVal
+	return newLeader
+}
+
+func (s *LockServer) notifyPeers(newLeader string) {
+	for _, peer := range s.peers {
+		if peer == s.selfIp {
+			continue
+		}
+
+		if !isReachable(peer) {
+			continue
+		}
+		conn, err := grpc.Dial(peer, grpc.WithInsecure())
+		if err != nil {
+			log.Printf("Warning: cannot connect to %s to update leader: %v", peer, err)
+			continue
+		}
+		client := pb.NewDistributedLockClient(conn)
+		_, err = client.UpdateLeader(context.Background(), &pb.UpdateLeaderRequest{LeaderIp: newLeader})
+		if err != nil {
+			log.Printf("Warning: cannot update leader on %s: %v", peer, err)
+		}
+		conn.Close()
+	}
+}
+
+func (s *LockServer) UpdateLeader(ctx context.Context, req *pb.UpdateLeaderRequest) (*pb.Empty, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.leaderIp = req.LeaderIp
+	log.Printf("Leader updated to %s", s.leaderIp)
+	return &pb.Empty{}, nil
 }
 
 func (s *LockServer) saveState() {
@@ -340,4 +498,18 @@ func main() {
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
+
+	time.Sleep(1 * time.Second)
+	newLeader := server.electLeader()
+	server.mu.Lock()
+	server.leaderIp = newLeader
+	server.mu.Unlock()
+	log.Printf("Leader elected: %s", newLeader)
+
+	if server.selfIp == newLeader {
+		server.notifyPeers(newLeader)
+	}
+
+	go server.SendandReceiveHeartbeat()
+
 }
