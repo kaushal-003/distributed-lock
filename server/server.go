@@ -18,8 +18,9 @@ import (
 
 // request queue
 type pendingRequest struct {
-	clientID string
-	response chan int32
+	clientID    string
+	response    chan int32
+	queuenumber int32
 }
 
 // data type to store server state in persistent storage
@@ -53,6 +54,7 @@ type LockServer struct {
 	peers             []string
 	lastHeartbeatTime time.Time
 	leaderIp          string
+	clientnumber      int
 }
 
 func (s *LockServer) GetQueueIndex(ctx context.Context, req *pb.Empty) (*pb.GetQueueIndexResponse, error) {
@@ -270,7 +272,7 @@ func (s *LockServer) loadState() {
 	log.Println("Recovery completed")
 }
 
-func NewLockServer() *LockServer {
+func NewLockServer(ip string, peers []string) *LockServer {
 	/*
 		NewLockServer initializes and returns a new instance of LockServer.
 		It performs the following tasks:
@@ -292,6 +294,10 @@ func NewLockServer() *LockServer {
 		queueMap:         make(map[string]bool),
 		lockTimeout:      20 * time.Second,
 		lastLockActivity: time.Now(),
+		queueindex:       0,
+		selfIp:           ip,
+		peers:            peers,
+		clientnumber:     0,
 	}
 	//loads prev state if any
 	s.loadState()
@@ -343,12 +349,37 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 
 	respChan := make(chan int32, 1)
 	s.queueMap[clientID] = true
-
+	s.clientnumber++
 	s.pendingQueue = append(s.pendingQueue, pendingRequest{
-		clientID: clientID,
-		response: respChan,
+		clientID:    clientID,
+		response:    respChan,
+		queuenumber: int32(s.clientnumber),
 	})
 	log.Printf("Client %s added to queue (position %d)", clientID, len(s.pendingQueue))
+
+	if s.selfIp == s.leaderIp {
+		for _, peer := range s.peers {
+			if peer == s.selfIp {
+				continue
+			}
+			go func(peer string) {
+				conn, err := grpc.Dial(peer, grpc.WithInsecure())
+				if err != nil {
+					log.Printf("Warning: cannot connect to %s to add to queue: %v", peer, err)
+					return
+				}
+				defer conn.Close()
+				client := pb.NewDistributedLockClient(conn)
+				_, err = client.AddQueue(context.Background(), &pb.AddQueueRequest{
+					ClientId:   clientID,
+					QueueIndex: int32(s.clientnumber),
+				})
+				if err != nil {
+					log.Printf("Warning: failed to add client %s to queue on %s: %v", clientID, peer, err)
+				}
+			}(peer)
+		}
+	}
 
 	if s.lockHolder == "" && len(s.pendingQueue) == 1 {
 		s.grantLock()
@@ -375,6 +406,7 @@ func (s *LockServer) grantLock() {
 
 	s.counter = 0
 	s.pendingQueue = s.pendingQueue[1:]
+	s.queueindex++
 	log.Printf("Lock granted to %s", next.clientID)
 
 	s.lastLockActivity = time.Now()
@@ -445,6 +477,74 @@ func (s *LockServer) LockRelease(ctx context.Context, req *pb.LockRequest) (*pb.
 	return &pb.LockResponse{Success: true}, nil
 }
 
+func (s *LockServer) AddQueue(ctx context.Context, req *pb.AddQueueRequest) (*pb.Empty, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	clientID := req.ClientId
+	if !s.queueMap[clientID] {
+		s.queueMap[clientID] = true
+		s.pendingQueue = append(s.pendingQueue, pendingRequest{
+			clientID:    clientID,
+			response:    make(chan int32, 1),
+			queuenumber: req.QueueIndex,
+		})
+		log.Printf("Added client %s to queue from leader", clientID)
+	}
+	return &pb.Empty{}, nil
+}
+
+func (s *LockServer) RemoveQueue(ctx context.Context, req *pb.RemoveQueueRequest) (*pb.Empty, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	queueIndex := req.QueueIndex
+	for i := 0; i < len(s.pendingQueue); i++ {
+		if s.pendingQueue[i].queuenumber < queueIndex {
+			delete(s.queueMap, s.pendingQueue[i].clientID)
+			close(s.pendingQueue[i].response)
+			s.pendingQueue = append(s.pendingQueue[:i], s.pendingQueue[i+1:]...)
+			i--
+			log.Printf("Removed client %s from queue", s.pendingQueue[i].clientID)
+		}
+	}
+	return &pb.Empty{}, nil
+}
+
+func (s *LockServer) UpdateQueue() {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.mu.Lock()
+		if s.selfIp == s.leaderIp && s.queueindex > 0 {
+			currentIndex := s.queueindex
+
+			for _, peer := range s.peers {
+				if peer == s.selfIp {
+					continue
+				}
+				go func(peer string) {
+					conn, err := grpc.Dial(peer, grpc.WithInsecure())
+					if err != nil {
+						log.Printf("Warning: cannot connect to %s for queue cleanup: %v", peer, err)
+						return
+					}
+					defer conn.Close()
+					client := pb.NewDistributedLockClient(conn)
+					_, err = client.RemoveQueue(context.Background(), &pb.RemoveQueueRequest{
+						QueueIndex: currentIndex,
+					})
+					if err != nil {
+						log.Printf("Warning: failed to cleanup queue on %s: %v", peer, err)
+					}
+				}(peer)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
 func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb.AppendResponse, error) {
 
 	/*
@@ -458,6 +558,16 @@ func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb
 	s.mu.Lock()
 	lockHolder := s.lockHolder
 	s.mu.Unlock()
+
+	if s.selfIp != s.leaderIp {
+		conn, err := grpc.Dial(s.leaderIp, grpc.WithInsecure())
+		if err != nil {
+			return nil, err
+		}
+		defer conn.Close()
+		client := pb.NewDistributedLockClient(conn)
+		return client.AppendFile(ctx, req)
+	}
 
 	if lockHolder != req.ClientId {
 		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 203}, nil
@@ -485,31 +595,41 @@ func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb
 }
 
 func main() {
-	lis, err := net.Listen("tcp", ":50051")
+	if len(os.Args) < 3 {
+		log.Fatalf("Usage: server <self-ip> <peer1> <peer2> ...")
+	}
+
+	selfIp := os.Args[1]
+	peers := os.Args[2:]
+
+	lis, err := net.Listen("tcp", selfIp)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	server := NewLockServer()
-	grpcServer := grpc.NewServer()
-	pb.RegisterDistributedLockServer(grpcServer, server)
-
-	log.Printf("Distributed Lock Server started on %v", lis.Addr())
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
-	}
+	server := grpc.NewServer()
+	srv := NewLockServer(selfIp, peers)
+	pb.RegisterDistributedLockServer(server, srv)
+	go func() {
+		fmt.Printf("Server listening at %s\n", selfIp)
+		if err := server.Serve(lis); err != nil {
+			log.Fatalf("Failed to serve: %v", err)
+		}
+	}()
 
 	time.Sleep(1 * time.Second)
-	newLeader := server.electLeader()
-	server.mu.Lock()
-	server.leaderIp = newLeader
-	server.mu.Unlock()
+	newLeader := srv.electLeader()
+	srv.mu.Lock()
+	srv.leaderIp = newLeader
+	srv.mu.Unlock()
 	log.Printf("Leader elected: %s", newLeader)
 
-	if server.selfIp == newLeader {
-		server.notifyPeers(newLeader)
+	if srv.selfIp == newLeader {
+		srv.notifyPeers(newLeader)
 	}
 
-	go server.SendandReceiveHeartbeat()
+	go srv.SendandReceiveHeartbeat()
+	go srv.UpdateQueue()
 
+	select {}
 }
