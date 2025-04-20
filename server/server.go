@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -36,6 +40,11 @@ type Mixed struct {
 	IntVal int
 }
 
+type WriteRequest struct {
+	FileID  int    `json:"file_id"`
+	Content string `json:"content"`
+}
+
 // server metadata
 type LockServer struct {
 	pb.UnimplementedDistributedLockServer
@@ -55,6 +64,7 @@ type LockServer struct {
 	lastHeartbeatTime time.Time
 	leaderIp          string
 	clientnumber      int
+	mongourl          string
 }
 
 func (s *LockServer) GetQueueIndex(ctx context.Context, req *pb.Empty) (*pb.GetQueueIndexResponse, error) {
@@ -275,7 +285,7 @@ func (s *LockServer) loadState() {
 	log.Println("Recovery completed")
 }
 
-func NewLockServer(ip string, peers []string) *LockServer {
+func NewLockServer(ip string, peers []string, mongourl string) *LockServer {
 	/*
 		NewLockServer initializes and returns a new instance of LockServer.
 		It performs the following tasks:
@@ -301,6 +311,7 @@ func NewLockServer(ip string, peers []string) *LockServer {
 		selfIp:           ip,
 		peers:            peers,
 		clientnumber:     0,
+		mongourl:         mongourl,
 	}
 	//loads prev state if any
 	s.loadState()
@@ -802,21 +813,42 @@ func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb
 	}
 
 	filename := req.Filename
+	file := filename[5:]
+	fileId, err := strconv.Atoi(file)
+
+	if err != nil {
+		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
+	}
+
 	count := req.Counter
 
 	if count == s.counter {
 		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
 	}
+	data := req.Data
+	//conv to string
+	strData := string(data)
+	reqData := WriteRequest{
+		FileID:  fileId,
+		Content: strData,
+	}
 
-	file, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0644)
+	jsonData, _ := json.Marshal(reqData)
+	resp, err := http.Post(fmt.Sprintf("%s/write", s.mongourl), "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
+		panic(err)
 	}
-	defer file.Close()
+	defer resp.Body.Close()
 
-	if _, err := file.Write(req.Data); err != nil {
-		return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
-	}
+	// file, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0644)
+	// if err != nil {
+	// 	return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
+	// }
+	// defer file.Close()
+
+	// if _, err := file.Write(req.Data); err != nil {
+	// 	return &pb.AppendResponse{Success: false, Counter: s.counter, StatusCode: 201}, nil
+	// }
 	s.counter = count
 	s.saveState()
 	return &pb.AppendResponse{Success: true, Counter: s.counter, StatusCode: 200}, nil
@@ -828,7 +860,10 @@ func main() {
 	}
 
 	selfIp := os.Args[1]
-	peers := os.Args[2:]
+	peers := os.Args[2 : len(os.Args)-1]
+	//last arg
+	mongoip := os.Args[len(os.Args)-1]
+	mongourl := fmt.Sprintf("http://%s", mongoip)
 
 	lis, err := net.Listen("tcp", selfIp)
 	if err != nil {
@@ -836,7 +871,7 @@ func main() {
 	}
 
 	server := grpc.NewServer()
-	srv := NewLockServer(selfIp, peers)
+	srv := NewLockServer(selfIp, peers, mongourl)
 	pb.RegisterDistributedLockServer(server, srv)
 	go func() {
 		fmt.Printf("Server listening at %s\n", selfIp)
