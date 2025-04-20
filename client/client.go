@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -56,46 +57,105 @@ func New(serverAddr, clientName string) (*RPCClient, error) {
 	}
 }
 
-func (c *RPCClient) LockAcquire() error {
+// func (c *RPCClient) LockAcquire() error {
 
+// 	var stream pb.DistributedLock_LockAcquireClient
+// 	var err error
+// 	isInQueue := false
+
+// 	for {
+// 		if !isInQueue {
+// 			stream, err = c.client.LockAcquire(context.Background(), &pb.LockRequest{
+// 				ClientId: c.ClientID,
+// 			})
+// 			if err != nil {
+// 				fmt.Printf("Attempt failed to acquire lock: %v. Retrying in 2 secs...\n", err)
+// 				time.Sleep(2 * time.Second)
+// 				continue
+// 			}
+// 		}
+
+// 		resp, err := stream.Recv()
+// 		if err != nil {
+// 			fmt.Printf("Error receiving from stream: %v. Retrying...\n", err)
+// 			time.Sleep(2 * time.Second)
+// 			isInQueue = false
+// 			continue
+// 		}
+
+// 		fmt.Println(resp.StatusCode)
+// 		if resp.StatusCode == 200 {
+// 			c.hasLock = true
+// 			c.count = int(resp.Counter)
+// 			fmt.Println("Lock acquired successfully!")
+// 			return nil
+// 		} else if resp.StatusCode == 201 {
+// 			isInQueue = true
+// 			fmt.Println("You're in the queue. Waiting for lock to be granted...")
+// 		} else {
+// 			time.Sleep(2 * time.Second)
+// 		}
+// 	}
+
+// }
+
+func (c *RPCClient) LockAcquire() error {
 	var stream pb.DistributedLock_LockAcquireClient
 	var err error
-	isInQueue := false
+	retryCount := 0
+	maxRetries := 5
 
 	for {
-		if !isInQueue {
+		// Create new stream if we don't have one
+		if stream == nil {
 			stream, err = c.client.LockAcquire(context.Background(), &pb.LockRequest{
 				ClientId: c.ClientID,
 			})
 			if err != nil {
-				fmt.Printf("Attempt failed to acquire lock: %v. Retrying in 2 secs...\n", err)
+				if retryCount >= maxRetries {
+					return fmt.Errorf("failed to acquire lock after %d attempts: %v", maxRetries, err)
+				}
+				fmt.Printf("Failed to acquire lock stream: %v. Retrying...\n", err)
 				time.Sleep(2 * time.Second)
+				retryCount++
 				continue
 			}
+			retryCount = 0
 		}
 
+		// Receive response from stream
 		resp, err := stream.Recv()
 		if err != nil {
-			fmt.Printf("Error receiving from stream: %v. Retrying...\n", err)
+			if err == io.EOF {
+				// Server closed the stream, which means our request was processed
+				fmt.Println("Server closed the stream, retrying...")
+				stream = nil
+				continue
+			}
+
+			fmt.Printf("Error receiving from stream: %v. Re-establishing connection...\n", err)
+			stream = nil
 			time.Sleep(2 * time.Second)
-			isInQueue = false
 			continue
 		}
 
-		fmt.Println(resp.StatusCode)
-		if resp.StatusCode == 200 {
+		switch resp.StatusCode {
+		case 200: // Lock acquired
 			c.hasLock = true
 			c.count = int(resp.Counter)
 			fmt.Println("Lock acquired successfully!")
 			return nil
-		} else if resp.StatusCode == 201 {
-			isInQueue = true
+
+		case 201: // In queue
 			fmt.Println("You're in the queue. Waiting for lock to be granted...")
-		} else {
+			// Continue waiting for updates
+
+		default:
+			fmt.Printf("Unexpected status code: %d\n", resp.StatusCode)
+			stream = nil
 			time.Sleep(2 * time.Second)
 		}
 	}
-
 }
 
 func (c *RPCClient) LockRelease() error {

@@ -174,6 +174,9 @@ func (s *LockServer) electLeader() string {
 }
 
 func (s *LockServer) notifyPeers(newLeader string) {
+	if len(s.pendingQueue) > 0 {
+		go s.grantLock()
+	}
 	for _, peer := range s.peers {
 		if peer == s.selfIp {
 			continue
@@ -326,27 +329,170 @@ func (s *LockServer) InitConnection(ctx context.Context, req *pb.InitRequest) (*
 	return &pb.InitResponse{ClientId: clientID, Success: true}, nil
 }
 
+// func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_LockAcquireServer) error {
+// 	/*
+// 	   LockAcquire handles a client's request to acquire the distributed lock.
+// 	   If the current server is not the leader, it forwards the request to the leader.
+// 	   If the client already holds the lock, it immediately responds with success.
+// 	   If the client is already in the queue, it acknowledges their position.
+// 	   Otherwise, the client is added to the pending queue and must wait for
+// 	   its turn to acquire the lock.
+// 	*/
+
+// 	if s.selfIp != s.leaderIp {
+// 		conn, err := grpc.Dial(s.leaderIp, grpc.WithInsecure())
+// 		if err != nil {
+// 			return stream.Send(&pb.LockResponse{
+// 				Success:    false,
+// 				StatusCode: 500,
+// 				Counter:    0,
+// 			})
+// 		}
+// 		defer conn.Close()
+
+// 		client := pb.NewDistributedLockClient(conn)
+// 		leaderStream, err := client.LockAcquire(context.Background(), req)
+// 		if err != nil {
+// 			return stream.Send(&pb.LockResponse{
+// 				Success:    false,
+// 				StatusCode: 503,
+// 				Counter:    0,
+// 			})
+// 		}
+
+// 		for {
+// 			resp, err := leaderStream.Recv()
+// 			if err == io.EOF {
+// 				return nil
+// 			}
+// 			if err != nil {
+// 				return err
+// 			}
+// 			if err := stream.Send(resp); err != nil {
+// 				return err
+// 			}
+// 		}
+// 	}
+
+// 	s.mu.Lock()
+// 	clientID := req.ClientId
+
+// 	if s.lockHolder == clientID {
+// 		s.mu.Unlock()
+// 		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 200, Counter: 0})
+// 	}
+
+// 	if s.queueMap[clientID] {
+// 		s.mu.Unlock()
+// 		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 201, Counter: 0})
+// 	}
+
+// 	respChan := make(chan int32, 1)
+// 	s.queueMap[clientID] = true
+// 	s.clientnumber++
+// 	s.pendingQueue = append(s.pendingQueue, pendingRequest{
+// 		clientID:    clientID,
+// 		response:    respChan,
+// 		queuenumber: int32(s.clientnumber),
+// 	})
+// 	log.Printf("Client %s added to queue (position %d)", clientID, len(s.pendingQueue))
+
+// 	if s.selfIp == s.leaderIp {
+// 		for _, peer := range s.peers {
+// 			if peer == s.selfIp {
+// 				continue
+// 			}
+// 			go func(peer string) {
+// 				conn, err := grpc.Dial(peer, grpc.WithInsecure())
+// 				if err != nil {
+// 					log.Printf("Warning: cannot connect to %s to add to queue: %v", peer, err)
+// 					return
+// 				}
+// 				defer conn.Close()
+// 				client := pb.NewDistributedLockClient(conn)
+// 				_, err = client.AddQueue(context.Background(), &pb.AddQueueRequest{
+// 					ClientId:   clientID,
+// 					QueueIndex: int32(s.clientnumber),
+// 				})
+// 				if err != nil {
+// 					log.Printf("Warning: failed to add client %s to queue on %s: %v", clientID, peer, err)
+// 				}
+// 			}(peer)
+// 		}
+// 	}
+
+// 	if s.lockHolder == "" && len(s.pendingQueue) == 1 {
+// 		s.grantLock()
+// 	}
+
+// 	s.mu.Unlock()
+
+// 	code := <-respChan
+// 	s.saveState()
+// 	return stream.Send(&pb.LockResponse{Success: true, StatusCode: code, Counter: 0})
+// }
+
 func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_LockAcquireServer) error {
-	/*
-		LockAcquire handles a client's request to acquire the distributed lock.
-		If the client already holds the lock, it immediately responds with success.
-		If the client is already in the queue, it acknowledges their position.
-		Otherwise, the client is added to the pending queue and must wait for
-		its turn to acquire the lock.
-	*/
+	// Forward to leader if this isn't the leader
+	if s.selfIp != s.leaderIp {
+		conn, err := grpc.Dial(s.leaderIp, grpc.WithInsecure())
+		if err != nil {
+			return stream.Send(&pb.LockResponse{
+				Success:    false,
+				StatusCode: 500,
+				Counter:    0,
+			})
+		}
+		defer conn.Close()
+
+		client := pb.NewDistributedLockClient(conn)
+		leaderStream, err := client.LockAcquire(context.Background(), req)
+		if err != nil {
+			return stream.Send(&pb.LockResponse{
+				Success:    false,
+				StatusCode: 503,
+				Counter:    0,
+			})
+		}
+
+		for {
+			resp, err := leaderStream.Recv()
+			if err != nil {
+				return err
+			}
+			if err := stream.Send(resp); err != nil {
+				return err
+			}
+			if resp.StatusCode == 200 { // Lock acquired
+				return nil
+			}
+		}
+	}
+
 	s.mu.Lock()
 	clientID := req.ClientId
 
+	// Check if client already holds the lock
 	if s.lockHolder == clientID {
 		s.mu.Unlock()
-		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 200, Counter: 0})
+		return stream.Send(&pb.LockResponse{
+			Success:    true,
+			StatusCode: 200,
+			Counter:    0,
+		})
 	}
 
+	// Check if client is already in queue
 	if s.queueMap[clientID] {
 		s.mu.Unlock()
-		return stream.Send(&pb.LockResponse{Success: true, StatusCode: 201, Counter: 0})
+		return stream.Send(&pb.LockResponse{
+			Success:    true,
+			StatusCode: 201,
+			Counter:    0,
+		})
 	}
 
+	// Create response channel and add to queue
 	respChan := make(chan int32, 1)
 	s.queueMap[clientID] = true
 	s.clientnumber++
@@ -357,6 +503,7 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 	})
 	log.Printf("Client %s added to queue (position %d)", clientID, len(s.pendingQueue))
 
+	// Propagate to followers if leader
 	if s.selfIp == s.leaderIp {
 		for _, peer := range s.peers {
 			if peer == s.selfIp {
@@ -381,15 +528,19 @@ func (s *LockServer) LockAcquire(req *pb.LockRequest, stream pb.DistributedLock_
 		}
 	}
 
+	// Grant lock immediately if queue was empty
 	if s.lockHolder == "" && len(s.pendingQueue) == 1 {
 		s.grantLock()
 	}
-
 	s.mu.Unlock()
 
+	// Wait for response (lock granted or error)
 	code := <-respChan
-	s.saveState()
-	return stream.Send(&pb.LockResponse{Success: true, StatusCode: code, Counter: 0})
+	return stream.Send(&pb.LockResponse{
+		Success:    true,
+		StatusCode: code,
+		Counter:    0,
+	})
 }
 
 func (s *LockServer) grantLock() {
@@ -424,24 +575,26 @@ func (s *LockServer) timeoutLock() {
 		timeoutLock removes access of the lock from current lockHolder
 		after timeout.
 	*/
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.selfIp == s.leaderIp {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	if s.lockHolder == "" {
-		return
-	}
+		if s.lockHolder == "" {
+			return
+		}
 
-	if time.Since(s.lastLockActivity) < s.lockTimeout {
-		s.lockTimer.Reset(s.lockTimeout)
-		return
-	}
+		if time.Since(s.lastLockActivity) < s.lockTimeout {
+			s.lockTimer.Reset(s.lockTimeout)
+			return
+		}
 
-	log.Printf("Lock timeout for client %s", s.lockHolder)
-	delete(s.queueMap, s.lockHolder)
-	s.lockHolder = ""
+		log.Printf("Lock timeout for client %s", s.lockHolder)
+		delete(s.queueMap, s.lockHolder)
+		s.lockHolder = ""
 
-	if len(s.pendingQueue) > 0 {
-		s.grantLock()
+		if len(s.pendingQueue) > 0 {
+			s.grantLock()
+		}
 	}
 }
 
@@ -499,15 +652,37 @@ func (s *LockServer) RemoveQueue(ctx context.Context, req *pb.RemoveQueueRequest
 	defer s.mu.Unlock()
 
 	queueIndex := req.QueueIndex
-	for i := 0; i < len(s.pendingQueue); i++ {
-		if s.pendingQueue[i].queuenumber < queueIndex {
+	s.queueindex = queueIndex
+	s.lockHolder = req.Lockholder
+	s.counter = req.Counter
+	s.clientnumber = int(req.Clientnumber)
+
+	if len(s.pendingQueue) == 0 || queueIndex <= 0 {
+		return &pb.Empty{}, nil
+	}
+
+	if int(queueIndex) > len(s.pendingQueue) {
+		queueIndex = int32(len(s.pendingQueue))
+	}
+
+	for i := 0; i < int(queueIndex); i++ {
+		if i < len(s.pendingQueue) {
 			delete(s.queueMap, s.pendingQueue[i].clientID)
-			close(s.pendingQueue[i].response)
-			s.pendingQueue = append(s.pendingQueue[:i], s.pendingQueue[i+1:]...)
-			i--
-			log.Printf("Removed client %s from queue", s.pendingQueue[i].clientID)
+			if s.pendingQueue[i].response != nil {
+				close(s.pendingQueue[i].response)
+			}
 		}
 	}
+
+	if int(queueIndex) <= len(s.pendingQueue) {
+		s.pendingQueue = s.pendingQueue[queueIndex:]
+	} else {
+		s.pendingQueue = s.pendingQueue[:0]
+	}
+
+	s.saveState()
+
+	log.Printf("Removed %d clients from queue", queueIndex)
 	return &pb.Empty{}, nil
 }
 
@@ -533,16 +708,69 @@ func (s *LockServer) UpdateQueue() {
 					defer conn.Close()
 					client := pb.NewDistributedLockClient(conn)
 					_, err = client.RemoveQueue(context.Background(), &pb.RemoveQueueRequest{
-						QueueIndex: currentIndex,
+						QueueIndex:   currentIndex,
+						Lockholder:   s.lockHolder,
+						Counter:      s.counter,
+						Clientnumber: int32(s.clientnumber),
 					})
-					if err != nil {
-						log.Printf("Warning: failed to cleanup queue on %s: %v", peer, err)
-					}
+					// if err != nil {
+					// 	log.Printf("Warning: failed to cleanup queue on %s: %v", peer, err)
+					// }
 				}(peer)
 			}
 		}
 		s.mu.Unlock()
 	}
+}
+
+func (s *LockServer) GetQueueState(ctx context.Context, req *pb.GetQueueRequest) (*pb.GetQueueResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	clientIDs := make([]string, len(s.pendingQueue))
+	for i, req := range s.pendingQueue {
+		clientIDs[i] = req.clientID
+	}
+
+	return &pb.GetQueueResponse{
+		ClientIds:  clientIDs,
+		QueueIndex: s.queueindex,
+		LockHolder: s.lockHolder,
+	}, nil
+}
+
+func (s *LockServer) syncWithLeader() error {
+	conn, err := grpc.Dial(s.leaderIp, grpc.WithInsecure())
+	if err != nil {
+		return fmt.Errorf("failed to connect to leader: %v", err)
+	}
+	defer conn.Close()
+
+	client := pb.NewDistributedLockClient(conn)
+	resp, err := client.GetQueueState(context.Background(), &pb.GetQueueRequest{})
+	if err != nil {
+		return fmt.Errorf("failed to get queue state: %v", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.pendingQueue = make([]pendingRequest, 0)
+	s.queueMap = make(map[string]bool)
+
+	for _, clientID := range resp.ClientIds {
+		s.queueMap[clientID] = true
+		s.pendingQueue = append(s.pendingQueue, pendingRequest{
+			clientID: clientID,
+			response: make(chan int32, 1),
+		})
+	}
+
+	s.queueindex = resp.QueueIndex
+	s.lockHolder = resp.LockHolder
+
+	log.Println("Successfully synchronized with leader")
+	return nil
 }
 
 func (s *LockServer) AppendFile(ctx context.Context, req *pb.AppendRequest) (*pb.AppendResponse, error) {
@@ -626,6 +854,13 @@ func main() {
 
 	if srv.selfIp == newLeader {
 		srv.notifyPeers(newLeader)
+	}
+
+	if srv.selfIp != srv.leaderIp {
+		err := srv.syncWithLeader()
+		if err != nil {
+			log.Printf("Failed to sync with leader: %v", err)
+		}
 	}
 
 	go srv.SendandReceiveHeartbeat()

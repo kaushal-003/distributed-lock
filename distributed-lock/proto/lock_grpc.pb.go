@@ -28,6 +28,7 @@ const (
 	DistributedLock_Heartbeat_FullMethodName      = "/distributed_lock.DistributedLock/Heartbeat"
 	DistributedLock_AddQueue_FullMethodName       = "/distributed_lock.DistributedLock/AddQueue"
 	DistributedLock_RemoveQueue_FullMethodName    = "/distributed_lock.DistributedLock/RemoveQueue"
+	DistributedLock_GetQueueState_FullMethodName  = "/distributed_lock.DistributedLock/GetQueueState"
 )
 
 // DistributedLockClient is the client API for DistributedLock service.
@@ -43,6 +44,7 @@ type DistributedLockClient interface {
 	Heartbeat(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	AddQueue(ctx context.Context, in *AddQueueRequest, opts ...grpc.CallOption) (*Empty, error)
 	RemoveQueue(ctx context.Context, in *RemoveQueueRequest, opts ...grpc.CallOption) (*Empty, error)
+	GetQueueState(ctx context.Context, in *GetQueueRequest, opts ...grpc.CallOption) (*GetQueueResponse, error)
 }
 
 type distributedLockClient struct {
@@ -152,6 +154,16 @@ func (c *distributedLockClient) RemoveQueue(ctx context.Context, in *RemoveQueue
 	return out, nil
 }
 
+func (c *distributedLockClient) GetQueueState(ctx context.Context, in *GetQueueRequest, opts ...grpc.CallOption) (*GetQueueResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetQueueResponse)
+	err := c.cc.Invoke(ctx, DistributedLock_GetQueueState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DistributedLockServer is the server API for DistributedLock service.
 // All implementations must embed UnimplementedDistributedLockServer
 // for forward compatibility.
@@ -165,6 +177,7 @@ type DistributedLockServer interface {
 	Heartbeat(context.Context, *Empty) (*Empty, error)
 	AddQueue(context.Context, *AddQueueRequest) (*Empty, error)
 	RemoveQueue(context.Context, *RemoveQueueRequest) (*Empty, error)
+	GetQueueState(context.Context, *GetQueueRequest) (*GetQueueResponse, error)
 	mustEmbedUnimplementedDistributedLockServer()
 }
 
@@ -201,6 +214,9 @@ func (UnimplementedDistributedLockServer) AddQueue(context.Context, *AddQueueReq
 }
 func (UnimplementedDistributedLockServer) RemoveQueue(context.Context, *RemoveQueueRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RemoveQueue not implemented")
+}
+func (UnimplementedDistributedLockServer) GetQueueState(context.Context, *GetQueueRequest) (*GetQueueResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetQueueState not implemented")
 }
 func (UnimplementedDistributedLockServer) mustEmbedUnimplementedDistributedLockServer() {}
 func (UnimplementedDistributedLockServer) testEmbeddedByValue()                         {}
@@ -378,6 +394,24 @@ func _DistributedLock_RemoveQueue_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DistributedLock_GetQueueState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetQueueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DistributedLockServer).GetQueueState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DistributedLock_GetQueueState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DistributedLockServer).GetQueueState(ctx, req.(*GetQueueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DistributedLock_ServiceDesc is the grpc.ServiceDesc for DistributedLock service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -416,6 +450,10 @@ var DistributedLock_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RemoveQueue",
 			Handler:    _DistributedLock_RemoveQueue_Handler,
+		},
+		{
+			MethodName: "GetQueueState",
+			Handler:    _DistributedLock_GetQueueState_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

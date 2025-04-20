@@ -14,6 +14,15 @@ service DistributedLock {
   rpc Heartbeat(Empty) returns (Empty);
   rpc AddQueue(AddQueueRequest) returns (Empty);
   rpc RemoveQueue(RemoveQueueRequest) returns (Empty);
+  rpc GetQueueState(GetQueueRequest) returns (GetQueueResponse);
+}
+
+message GetQueueRequest {}
+
+message GetQueueResponse {
+  repeated string client_ids = 1;
+  int32 queue_index = 2;
+  string lock_holder = 3;
 }
 
 message AddQueueRequest {
@@ -23,6 +32,9 @@ message AddQueueRequest {
 
 message RemoveQueueRequest {
   int32 queue_index = 1;
+  string lockholder = 2;
+  int32 counter = 3;
+  int32 clientnumber = 4;
 }
 
 message Empty {}
