@@ -49,14 +49,15 @@ go run fileServer/server.go
 ```
 #### 2. Start Lock Servers
 ```bash
-# Example with 3 servers
-./lock-server 127.0.0.1:5000 127.0.0.1:5001 127.0.0.1:5002 localhost:8080
-./lock-server 127.0.0.1:5001 127.0.0.1:5000 127.0.0.1:5002 localhost:8080
-./lock-server 127.0.0.1:5002 127.0.0.1:5000 127.0.0.1:5001 localhost:8080
+# Example with 3 servers (in server directory)
+go run server.go 127.0.0.1:5000 127.0.0.1:5001 127.0.0.1:5002 127.0.0.1:8080
+go run server.go 127.0.0.1:5001 127.0.0.1:5000 127.0.0.1:5002 127.0.0.1:8080
+go run server.go 127.0.0.1:5002 127.0.0.1:5000 127.0.0.1:5001 127.0.0.1:8080
 ```
 #### 3. Start a Client
 ```bash
-./lock-client 127.0.0.1:5000 [client-name]
+# Example with single client (in client directory)
+go run client.go 127.0.0.1:5000 [client-name]
 ```
 
 #### 4. Available Commands
